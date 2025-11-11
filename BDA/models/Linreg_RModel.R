@@ -25,26 +25,42 @@ predictions <- c()
 actuals     <- c()
 dates       <- as.Date(character())
 
-# Generate monthly dates (like freq="MS" in pandas)
+# Generate monthly dates
 test_dates <- seq(from = test_start, to = test_end, by = "month")
 
 # Function for rolling window inflation category calculation
-inflation_cats <- function(df, end_train, window = 300){
-  window_start <- end_train %m-% lubridate::years(window_years)
-  train_window <- df %>% filter(Date >= window_start & Date <= end_train)
-  
-  previous_values <- train_window$Inflation
-  end_train_value <- df %>% filter(Date == end_train) %>% pull(Inflation)
-  
-  positive_median <- median(previous_values[previous_values >= 0])
-  if (end_train_value < 0){
-    return ("negative")
-  } else if (end_train_value < positive_median) {
-    return ("low")
+inflation_cats <- function(past_values, current_value){
+  # First datapoint negative
+  if (length(past_values) == 0) {
+    return("negative")
+  }
+  pos_values <- past_values[past_values >= 0]
+  pos_median <- if(length(pos_values) == 0) 0 else median(pos_values)
+  if (current_value < 0) {
+    return("negative")
+  } else if (current_value < pos_median) {
+    return("low")
   } else {
-    return ("high")
+    return("high")
   }
 }
+
+# Compute inflation categories
+window_size <- 120
+df <- df %>%
+  mutate(
+    Inflation_Category = map_chr(
+      seq_len(nrow(df)),
+      ~ {
+        hist_values <- df$Inflation[max(1, .x - window_size):(.x - 1)]
+        inflation_cats(hist_values, df$Inflation[.x])
+      }
+    ),
+    Inflation_Category = factor(
+      Inflation_Category,
+      levels = c("negative", "low", "high")
+    )
+  )
 
 # Function for generating posterior predictions
 generate_prediction <- function(model, newdata){
@@ -58,15 +74,14 @@ generate_prediction <- function(model, newdata){
 
 # Formula for bayesian model
 pooled_formula <- bf(
-  Real_Return_10Y ~ 1 + (1 + CAPE | Inflation_Category),
+  Real_Return_10Y ~ 1 + CAPE + (1 | Inflation_Category),
   family = "gaussian",
   center = FALSE
 )
 
 priors <- c(
   prior(normal(0, 1), class = "b"),
-  prior(normal(0, 1), class = "sd"),
-  prior(lkj(2), class = "cor")
+  prior(normal(0, 1), class = "sd")
 )
 
 ###########################
@@ -81,7 +96,10 @@ train <- df %>%
 model <- brm(
   formula = pooled_formula,
   prior = priors,
-  data = train
+  data = train,
+  chains = 3,
+  iter = 2000,
+  warmup = 1000
 )
 
 ##################################################
@@ -92,8 +110,7 @@ for (i in seq_along(test_dates)) {
   
   current_date <- as.Date(test_dates[i])
   test_sample <- df %>%
-    filter(Date == current_date) %>%
-    mutate(Inflation_Category = inflation_cats(df, train_end))
+    filter(Date == current_date)
   
   y_pred <- generate_prediction(model, test_sample)
   y_true <- test_sample$Real_Return_10Y
@@ -148,4 +165,3 @@ ggplot(results_df, aes(x = Date)) +
     colour = ""
   ) +
   theme_minimal()
-
