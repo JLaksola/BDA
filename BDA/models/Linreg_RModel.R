@@ -3,6 +3,7 @@ rm(list=ls())
 library(lubridate)   # for date arithmetic
 library(ggplot2)     # for plotting
 library(dplyr)       # for data manipulation
+library(brms)
 
 # Load the data
 file_path <- "/Users/kayttaja/Desktop/BDA/data/processed/Shiller_cleaned.csv"
