@@ -1,28 +1,25 @@
-# Load libraries
 rm(list=ls())
-library(lubridate)   # for date arithmetic
-library(ggplot2)     # for plotting
-library(dplyr)       # for data manipulation
+library(lubridate)   
+library(ggplot2)     
+library(dplyr)      
 library(brms)
-
-# Load the data
-file_path <- "C:/Users/antti/Desktop/Koulu/BDA/BDA/data/processed/Shiller_cleaned.csv"
-df <- read.csv(file_path, stringsAsFactors = FALSE)
-
-# Parse Date column and drop NAs
-df$Date <- as.Date(df$Date) 
-df <- df[complete.cases(df), ]
-
-# Define the inverse CAPE variable
-df$inv_CAPE <- 1 / df$CAPE
+library(cmdstanr)
+library(purrr)
 
 
-# Rolling forecast settings
+file_path <- "data/processed/Shiller_cleaned.csv"
+df <- read.csv(file_path, stringsAsFactors = FALSE) %>%
+  mutate(
+    Date = as.Date(Date),
+    inv_CAPE = 1 / CAPE
+  ) %>%
+  filter(complete.cases(.)) %>%
+  arrange(Date)
+
 train_start <- as.Date("1881-01-01")
 test_start  <- as.Date("1990-01-01")
 test_end    <- as.Date("2015-02-01")
 
-# Initialize empty containers
 rmse_list   <- c()
 predictions <- c()
 actuals     <- c()
@@ -31,58 +28,99 @@ dates       <- as.Date(character())
 # Generate monthly dates (like freq="MS" in pandas)
 test_dates <- seq(from = test_start, to = test_end, by = "month")
 
+# Function for rolling window inflation category calculation
+inflation_cats <- function(df, end_train, window = 300){
+  window_start <- end_train %m-% lubridate::years(window_years)
+  train_window <- df %>% filter(Date >= window_start & Date <= end_train)
+  
+  previous_values <- train_window$Inflation
+  end_train_value <- df %>% filter(Date == end_train) %>% pull(Inflation)
+  
+  positive_median <- median(previous_values[previous_values >= 0])
+  if (end_train_value < 0){
+    return ("negative")
+  } else if (end_train_value < positive_median) {
+    return ("low")
+  } else {
+    return ("high")
+  }
+}
+
+# Function for generating posterior predictions
+generate_prediction <- function(model, newdata){
+  posterior_draws <- posterior_epred(
+    model,
+    newdata = newdata,
+    allow_new_levels = TRUE
+  )
+  return (mean(posterior_draws))
+}
+
 # Formula for bayesian model
 pooled_formula <- bf(
-  Real_Return_10Y ~ 1 + CAPE + Inflation,
+  Real_Return_10Y ~ 1 + (1 + CAPE | Inflation_Category),
   family = "gaussian",
   center = FALSE
 )
 
-# Function to return priors, priors could b adjusted as training proceeds?
-priors <- function(){
-  priors <- c(
-    prior(normal(0, 1), class = "b", coef = "Intercept"),
-    prior(normal(0, 1), class = "b", coef = "CAPE"),
-    prior(normal(0, 1), class = "b", coef = "Inflation")
-  )
-  return (priors)
-}
+priors <- c(
+  prior(normal(0, 1), class = "b"),
+  prior(normal(0, 1), class = "sd"),
+  prior(lkj(2), class = "cor")
+)
 
-# Rolling Forecast Loop
+###########################
+#### Fit Initial Model ####
+###########################
+
+initial_test_date <- as.Date(test_dates[1])
+train_end <- initial_test_date %m-% lubridate::period(years = 10, months = 1)
+train <- df %>% 
+  filter(Date >= train_start, Date <= train_end)
+
+model <- brm(
+  formula = pooled_formula,
+  prior = priors,
+  data = train
+)
+
+##################################################
+#### Rolling Forecast Loop With Model Updates ####
+##################################################
+
 for (i in seq_along(test_dates)) {
+  
   current_date <- as.Date(test_dates[i])
-  # Train end: 10 years and 1 month before current_date
-  train_end <- current_date %m-% lubridate::period(years = 10, months = 1)
-                                                   
-  # Define train and test sets
-  train <- df %>% 
-    filter(Date >= train_start, Date <= train_end)
   test_sample <- df %>%
-    filter(Date == current_date)
+    filter(Date == current_date) %>%
+    mutate(Inflation_Category = inflation_cats(df, train_end))
   
-  if (nrow(test_sample) == 0 || nrow(train) == 0) next
-  
-  model <- brm(
-    formula = pooled_formula,
-    prior = priors(),
-    data = train
-  )
-  
-  y_pred <- posterior_epred(
-    model,
-    newdata = test_sample,
-    allow_new_levels = TRUE
-  )
-  y_test <- test_sample$Real_Return_10Y
-  
-  rmse_i <- sqrt(mean((y_test - y_pred)^2))
+  y_pred <- generate_prediction(model, test_sample)
+  y_true <- test_sample$Real_Return_10Y
+  rmse_i <- sqrt(mean((y_true - y_pred)^2))
   
   # Store results
   rmse_list   <- c(rmse_list, rmse_i)
   predictions <- c(predictions, as.numeric(y_pred))
-  actuals     <- c(actuals, as.numeric(y_test))
+  actuals     <- c(actuals, as.numeric(y_true))
   dates       <- c(dates, current_date)
+  
+  # New datapoint for training set
+  train_end <- train_end %m+% lubridate::period(months = 1)
+  train <- df %>%
+    filter(Date >= train_start, Date <= train_end)
+  
+  # Update model
+  model <- update(
+    model,
+    newdata = train,
+    recompile = FALSE
+  )
 }
+
+###########################
+#### Inspect Results ####
+###########################
 
 # Convert results to data frame
 results_df <- data.frame(
@@ -110,3 +148,4 @@ ggplot(results_df, aes(x = Date)) +
     colour = ""
   ) +
   theme_minimal()
+
