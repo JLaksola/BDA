@@ -6,22 +6,16 @@ library(dplyr)       # for data manipulation
 library(brms)
 
 # Load the data
-file_path <- "/Users/kayttaja/Desktop/BDA/data/processed/Shiller_cleaned.csv"
+file_path <- "C:/Users/antti/Desktop/Koulu/BDA/BDA/data/processed/Shiller_cleaned.csv"
 df <- read.csv(file_path, stringsAsFactors = FALSE)
 
 # Parse Date column and drop NAs
-df$Date <- as.Date(df$Date)          # assumes "YYYY-MM-DD" format
+df$Date <- as.Date(df$Date) 
 df <- df[complete.cases(df), ]
-
-# Look at summary and first rows
-print(summary(df))
-print(head(df))
 
 # Define the inverse CAPE variable
 df$inv_CAPE <- 1 / df$CAPE
 
-# Define the target variable
-target <- "Real_Return_10Y"
 
 # Rolling forecast settings
 train_start <- as.Date("1881-01-01")
@@ -37,32 +31,50 @@ dates       <- as.Date(character())
 # Generate monthly dates (like freq="MS" in pandas)
 test_dates <- seq(from = test_start, to = test_end, by = "month")
 
+# Formula for bayesian model
+pooled_formula <- bf(
+  Real_Return_10Y ~ 1 + CAPE + Inflation,
+  family = "gaussian",
+  center = FALSE
+)
+
+# Function to return priors, priors could b adjusted as training proceeds?
+priors <- function(){
+  priors <- c(
+    prior(normal(0, 1), class = "b", coef = "Intercept"),
+    prior(normal(0, 1), class = "b", coef = "CAPE"),
+    prior(normal(0, 1), class = "b", coef = "Inflation")
+  )
+  return (priors)
+}
+
 # Rolling Forecast Loop
 for (i in seq_along(test_dates)) {
-  # Make absolutely sure current_date is Date
   current_date <- as.Date(test_dates[i])
-  
   # Train end: 10 years and 1 month before current_date
   train_end <- current_date %m-% lubridate::period(years = 10, months = 1)
-  
+                                                   
   # Define train and test sets
   train <- df %>% 
     filter(Date >= train_start, Date <= train_end)
-  
   test_sample <- df %>%
     filter(Date == current_date)
   
-  # Skip if there is no test_sample for this date
   if (nrow(test_sample) == 0 || nrow(train) == 0) next
   
-  # Train linear model: Real_Return_10Y ~ CAPE
-  model <- lm(Real_Return_10Y ~ CAPE, data = train)
+  model <- brm(
+    formula = pooled_formula,
+    prior = priors(),
+    data = train
+  )
   
-  # Predict for the test sample
-  y_pred <- predict(model, newdata = test_sample)
+  y_pred <- posterior_epred(
+    model,
+    newdata = test_sample,
+    allow_new_levels = TRUE
+  )
   y_test <- test_sample$Real_Return_10Y
   
-  # RMSE for this single prediction
   rmse_i <- sqrt(mean((y_test - y_pred)^2))
   
   # Store results
