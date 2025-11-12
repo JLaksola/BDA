@@ -3,9 +3,15 @@ library(lubridate)
 library(ggplot2)     
 library(dplyr)      
 library(brms)
-library(cmdstanr)
 library(purrr)
+library(cmdstanr)
+library(parallel)
 
+# Comment this out if cmdstan works
+#install_cmdstan(dir = "~/cmdstan")
+set_cmdstan_path("~/cmdstan/cmdstan-2.37.0")
+
+cores <- max(1, parallel::detectCores() - 1)
 
 file_path <- "data/processed/Shiller_cleaned.csv"
 df <- read.csv(file_path, stringsAsFactors = FALSE) %>%
@@ -23,10 +29,13 @@ test_end    <- as.Date("2015-02-01")
 rmse_list   <- c()
 predictions <- c()
 actuals     <- c()
+lowers      <- c()
+uppers      <- c()
 dates       <- as.Date(character())
 
 # Generate monthly dates
 test_dates <- seq(from = test_start, to = test_end, by = "month")
+n_iter <- length(test_dates)
 
 # Function for rolling window inflation category calculation
 inflation_cats <- function(past_values, current_value){
@@ -63,13 +72,16 @@ df <- df %>%
   )
 
 # Function for generating posterior predictions
-generate_prediction <- function(model, newdata){
+generate_prediction <- function(model, newdata, prob = 0.95){
   posterior_draws <- posterior_epred(
     model,
     newdata = newdata,
     allow_new_levels = TRUE
   )
-  return (mean(posterior_draws))
+  pred_mean <- mean(posterior_draws)
+  ci_lower <- quantile(posterior_draws, probs = (1 - prob) / 2)
+  ci_upper <- quantile(posterior_draws, probs = 1 - (1 - prob) / 2)
+  return (c(pred_mean, ci_lower, ci_upper))
 }
 
 # Formula for bayesian model
@@ -97,9 +109,11 @@ model <- brm(
   formula = pooled_formula,
   prior = priors,
   data = train,
-  chains = 3,
-  iter = 2000,
-  warmup = 1000
+  chains = 2,
+  iter = 1500,
+  warmup = 300,
+  backend = "cmdstanr",
+  cores = cores
 )
 
 ##################################################
@@ -108,11 +122,20 @@ model <- brm(
 
 for (i in seq_along(test_dates)) {
   
+  if (i > 20){
+    break
+  }
+  
+  start <- proc.time()
+  
   current_date <- as.Date(test_dates[i])
   test_sample <- df %>%
     filter(Date == current_date)
   
-  y_pred <- generate_prediction(model, test_sample)
+  preds <- generate_prediction(model, test_sample)
+  y_pred <- preds[1]
+  lower <- preds[2]
+  upper <- preds[3]
   y_true <- test_sample$Real_Return_10Y
   rmse_i <- sqrt(mean((y_true - y_pred)^2))
   
@@ -120,6 +143,8 @@ for (i in seq_along(test_dates)) {
   rmse_list   <- c(rmse_list, rmse_i)
   predictions <- c(predictions, as.numeric(y_pred))
   actuals     <- c(actuals, as.numeric(y_true))
+  lowers      <- c(lowers, lower)
+  uppers      <- c(uppers, upper)
   dates       <- c(dates, current_date)
   
   # New datapoint for training set
@@ -133,6 +158,11 @@ for (i in seq_along(test_dates)) {
     newdata = train,
     recompile = FALSE
   )
+  
+  end <- proc.time()
+  elapsed <- (end - start)["elapsed"]
+  
+  cat("\nITERATION STEP", i, "/", n_iter, "COMPLETED IN", elapsed, "SECONDS\n")
 }
 
 ###########################
@@ -144,6 +174,8 @@ results_df <- data.frame(
   Date      = dates,
   Predicted = predictions,
   Actual    = actuals,
+  Upper     = uppers,
+  Lower     = lowers,
   RMSE      = rmse_list
 )
 
@@ -158,6 +190,7 @@ cat("Overall R-squared:", r_squared, "\n")
 ggplot(results_df, aes(x = Date)) +
   geom_line(aes(y = Predicted, colour = "Predicted")) +
   geom_line(aes(y = Actual,    colour = "Actual")) +
+  geom_ribbon(aes(ymin = Lower, ymax = Upper), fill = "blue", alpha = 0.1) +
   labs(
     title = "Predicted vs Actual Returns",
     x = "Date",
