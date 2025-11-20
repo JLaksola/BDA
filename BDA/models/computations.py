@@ -1,6 +1,6 @@
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
+import numpy as np
 
 # Load data
 path1 = "/Users/kayttaja/Desktop/BDA/data/raw/Shiller_data.xls"
@@ -20,6 +20,7 @@ shiller_df["Date"] = shiller_df["Date"] * 100
 shiller_df["Date"] = pd.to_datetime(shiller_df["Date"], format="%Y%m")
 # Sort by Date
 shiller_df = shiller_df.sort_values(by="Date").reset_index(drop=True)
+shiller_df = shiller_df.set_index("Date")
 print(shiller_df.tail())
 
 # Compute year over year inflation
@@ -34,9 +35,100 @@ print("Inflation Std:", shiller_df["Inflation"].std())
 print("GS10 Mean:", shiller_df["GS10"].mean())
 print("GS10 Std:", shiller_df["GS10"].std())
 
+# Let's make a 10-year rolling average inflation value
+shiller_df["Inflation_10Y_Rolling"] = shiller_df["Inflation"].rolling(window=120).mean()
+print(shiller_df.tail())
+
+
+# Create inflation categories based on past 10-year median
+def inflation_cats(past_values, current_value):
+    # Jos ei ole yhtään historiaa -> laitetaan negatiiviseen (tai voit valita jonkin muun defaultin)
+    if len(past_values) == 0:
+        return "negative"
+
+    # Menneet positiiviset inflaatiot
+    pos_values = [v for v in past_values if v >= 0]
+
+    # Jos ei ole menneitä positiivisia havaintoja
+    if len(pos_values) == 0:
+        return "negative" if current_value < 0 else "low"
+
+    # Ensin hoidetaan negatiiviset arvot
+    if current_value < 0:
+        return "negative"
+
+    # Lasketaan 1/3- ja 2/3-quantile positiivisille
+    q1, q2 = np.quantile(pos_values, [1 / 3, 2 / 3])
+
+    # Jaotellaan kolmeen yhtä suureen osaan positiiviset
+    if current_value < q1:
+        return "low"  # matala
+    elif current_value < q2:
+        return "medium"  # keskitaso
+    else:
+        return "high"  # korkea
+
+
+inflation_values = shiller_df["Inflation_10Y_Rolling"].astype(float).tolist()
+
+start_date = pd.Timestamp("1990-01-01")
+
+# Inflaatio sarjana
+inflation = shiller_df["Inflation_10Y_Rolling"].astype(float)
+
+# Maskit indeksin perusteella
+pre_mask = shiller_df.index < start_date
+post_mask = ~pre_mask
+
+cats = pd.Series(index=shiller_df.index, dtype="object")
+
+# --- 3.1 Pre-1980: kategoriat koko pre-1980 jakson jakauman mukaan ---
+
+pre_pos_values = inflation[pre_mask & (inflation >= 0)].tolist()
+
+if len(pre_pos_values) > 0:
+    q1_pre, q2_pre = np.quantile(pre_pos_values, [1 / 3, 2 / 3])
+else:
+    q1_pre, q2_pre = None, None
+
+for idx in shiller_df[pre_mask].index:
+    val = inflation.loc[idx]
+
+    if q1_pre is None:
+        # fallback: jos ei ole positiivista dataa ennen 1980
+        cats.loc[idx] = "negative" if val < 0 else "low"
+    else:
+        if val < 0:
+            cats.loc[idx] = "negative"
+        elif val < q1_pre:
+            cats.loc[idx] = "low"
+        elif val < q2_pre:
+            cats.loc[idx] = "medium"
+        else:
+            cats.loc[idx] = "high"
+
+# --- 3.2 Vuodesta 1980 alkaen: laajeneva ikkuna, joka sisältää myös pre-1980 datan ---
+
+# Historiaksi kaikki pre-1980 inflaatiot
+past_values = inflation[pre_mask].tolist()
+
+for idx in shiller_df[post_mask].index:
+    val = inflation.loc[idx]
+
+    # Luokitus käyttäen KAIKKIA menneitä havaintoja (pre-1980 + 1980–t-1)
+    cats.loc[idx] = inflation_cats(past_values, val)
+
+    # Päivitä historia (laajeneva ikkuna)
+    past_values.append(val)
+
+# Lopuksi talteen
+shiller_df["Inflation_Category"] = cats
+
+print(shiller_df.tail(125))
+
 # Let's plot time series of the Real_Return_10Y
 plt.figure(figsize=(10, 5))
-plt.plot(shiller_df["Date"], shiller_df["Real_Return_10Y"], color="purple")
+plt.plot(shiller_df.index, shiller_df["Real_Return_10Y"], color="purple")
 plt.title("10-Year Annualized Real Stock Return Over Time")
 plt.xlabel("Date")
 plt.ylabel("Real Return (%)")
@@ -58,21 +150,28 @@ plt.ylabel("Frequency")
 plt.tight_layout()
 plt.show()
 
-# Plot time series of Inflation and GS10
+# Plot time series of Inflation, GS10 and CAPE
 plt.figure(figsize=(12, 5))
-plt.subplot(2, 1, 1)
+plt.subplot(3, 1, 1)
 plt.plot(shiller_df["Date"], shiller_df["Inflation"], color="blue")
 plt.title("Year-over-Year Inflation Over Time")
 plt.xlabel("Date")
 plt.ylabel("Inflation (%)")
 plt.grid()
-plt.subplot(2, 1, 2)
+plt.subplot(3, 1, 2)
 plt.plot(shiller_df["Date"], shiller_df["GS10"], color="green")
 plt.title("10-Year Treasury Yield Over Time")
 plt.xlabel("Date")
 plt.ylabel("GS10 (%)")
 plt.tight_layout()
 plt.grid()
+plt.subplot(3, 1, 3)
+plt.plot(shiller_df["Date"], shiller_df["CAPE"], color="orange")
+plt.title("CAPE Over Time")
+plt.xlabel("Date")
+plt.ylabel("CAPE")
+plt.grid()
+plt.tight_layout()
 plt.show()
 
 
