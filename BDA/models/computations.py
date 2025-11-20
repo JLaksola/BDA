@@ -177,4 +177,4 @@ plt.show()
 
 # Save cleaned data
 path = "/Users/kayttaja/Desktop/BDA/data/processed/Shiller_cleaned.csv"
-shiller_df.to_csv(path, index=False)
+shiller_df.to_csv(path, index=True)
