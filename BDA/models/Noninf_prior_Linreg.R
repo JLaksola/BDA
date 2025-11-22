@@ -1,0 +1,276 @@
+rm(list=ls())
+library(lubridate)   
+library(ggplot2)     
+library(dplyr)      
+library(brms)
+library(purrr)
+library(parallel)
+library(posterior)
+library(tidyr)
+source("~/Desktop/BDA/models/Functions.R")
+
+# Comment this out if cmdstan works
+# install.packages("cmdstanr", repos = c("https://mc-stan.org/r-packages/",getOption("repos")))
+library(cmdstanr)
+# dir.create(file.path("~/cmdstan"), showWarnings = FALSE)
+# install_cmdstan(dir = "~/cmdstan")
+# set_cmdstan_path("~/cmdstan/cmdstan-2.37.0")
+
+cores <- max(1, parallel::detectCores() - 1)
+
+#########################
+#### Preprocess Data ####
+#########################
+
+file_path <- "~/Desktop/BDA/data/processed/Shiller_cleaned.csv"
+df <- read.csv(file_path, stringsAsFactors = FALSE) %>%
+  mutate(
+    Date = as.Date(Date),
+    inv_CAPE = 1 / CAPE,
+    CAPE_scaled = scale(CAPE),
+    Inflation_scaled = scale(Inflation)
+  ) %>%
+  filter(complete.cases(.)) %>%
+  arrange(Date)
+
+train_start <- as.Date("1881-01-01")
+test_start  <- as.Date("1990-01-01")
+test_end    <- as.Date("2015-02-01")
+
+rmse_list     <- c()
+predictions   <- c()
+actuals       <- c()
+lowers        <- c()
+uppers        <- c()
+dates         <- as.Date(character())
+diagnostics   <- list()
+
+# Generate monthly dates
+test_dates <- seq(from = test_start, to = test_end, by = "month")
+n_iter <- length(test_dates)
+
+window_size <- 120
+
+###########################
+#### Utility functions ####
+###########################
+
+# Function for generating posterior predictions
+generate_prediction <- function(model, newdata, prob = 0.95){
+  posterior_draws <- posterior_epred(
+    model,
+    newdata = newdata,
+    allow_new_levels = TRUE
+  )
+  pred_mean <- mean(posterior_draws)
+  ci_lower <- quantile(posterior_draws, probs = (1 - prob) / 2)
+  ci_upper <- quantile(posterior_draws, probs = 1 - (1 - prob) / 2)
+  return (c(pred_mean, ci_lower, ci_upper))
+}
+
+# Store convergence diagnostics
+convergence_diagnostics <- function(current_date, model){
+  # Posterior parameter draws
+  draws_array <- as_draws_array(model)
+  
+  # Automatically select parameter columns (exclude metadata/internal columns)
+  param_cols <- setdiff(dimnames(draws_array)[[3]], c("lp__", "lprior"))
+  
+  # Initialize vectors to store diagnostics
+  rhat_vals <- numeric(length(param_cols))
+  ess_bulk_vals <- numeric(length(param_cols))
+  ess_tail_vals <- numeric(length(param_cols))
+  
+  # Loop over parameters
+  for (i in seq_along(param_cols)) {
+    par <- param_cols[i]
+    par_draws <- draws_array[,,par]  # iterations x chains
+    print(par_draws)
+    rhat_vals[i] <- rhat(par_draws)
+    ess_bulk_vals[i] <- ess_bulk(par_draws)
+    ess_tail_vals[i] <- ess_tail(par_draws)
+  }
+  
+  # Combine into data frame
+  diag_df <- data.frame(
+    Date      = current_date,
+    Parameter = param_cols,
+    Rhat      = rhat_vals,
+    ESS_Bulk  = ess_bulk_vals,
+    ESS_Tail  = ess_tail_vals
+  )
+  
+  return (diag_df)
+}
+
+######################
+#### Define Model ####
+######################
+
+# Formula for bayesian model
+formula <- bf(
+  Real_Return_10Y ~ 1 + CAPE,
+  family = "gaussian",
+  center = FALSE
+)
+
+priors <- c(
+  prior(normal(0, 1), class = "b"),
+  prior(normal(0, 1), class = "sd")
+)
+
+###########################
+#### Fit Initial Model ####
+###########################
+
+initial_test_date <- as.Date(test_dates[1])
+train_end <- initial_test_date %m-% lubridate::period(years = 10, months = 1)
+train <- df %>% 
+  filter(Date >= train_start, Date <= train_end)
+
+model <- brm(
+  formula = formula,
+  prior = priors,
+  data = train,
+  chains = 3,
+  iter = 2000,
+  warmup = 1000,
+  backend = "cmdstanr",
+  cores = cores
+)
+
+##################################################
+#### Rolling Forecast Loop With Model Updates ####
+##################################################
+
+for (i in seq_along(test_dates)) {
+  
+  if (i > 10){
+    break
+  }
+  
+  start <- proc.time()
+  
+  current_date <- as.Date(test_dates[i])
+  test_sample <- df %>%
+    filter(Date == current_date)
+  
+  # Predict
+  preds <- generate_prediction(model, test_sample)
+  y_pred <- preds[1]
+  lower <- preds[2]
+  upper <- preds[3]
+  y_true <- test_sample$Real_Return_10Y
+  rmse_i <- sqrt(mean((y_true - y_pred)^2))
+  
+  # Store results
+  rmse_list     <- c(rmse_list, rmse_i)
+  predictions   <- c(predictions, as.numeric(y_pred))
+  actuals       <- c(actuals, as.numeric(y_true))
+  lowers        <- c(lowers, lower)
+  uppers        <- c(uppers, upper)
+  dates         <- c(dates, current_date)
+  
+  # Store convergence diagnostics
+  diagnostics[[i]] <- convergence_diagnostics(current_date, model)
+  
+  # New datapoint for training set
+  train_end <- train_end %m+% lubridate::period(months = 1)
+  train <- df %>%
+    filter(Date >= train_start, Date <= train_end)
+  
+  # Update model
+  if (i != n_iter){
+    model <- update(
+      model,
+      newdata = train,
+      recompile = FALSE
+    )
+  }
+  
+  end <- proc.time()
+  elapsed <- (end - start)["elapsed"]
+  
+  cat("\nITERATION STEP", i, "/", n_iter, "COMPLETED IN", elapsed, "SECONDS\n")
+}
+
+# Convert results to data frame
+results_df <- data.frame(
+  Date         = dates,
+  Predicted    = predictions,
+  Actual       = actuals,
+  Upper        = uppers,
+  Lower        = lowers,
+  RMSE         = rmse_list
+)
+
+###########################
+#### Inspect Results ####
+###########################
+
+# Overall RMSE and R-squared
+overall_rmse <- sqrt(mean((results_df$Actual - results_df$Predicted)^2))
+r_squared    <- cor(results_df$Actual, results_df$Predicted)^2
+
+cat("Overall RMSE:", overall_rmse, "\n")
+cat("Overall R-squared:", r_squared, "\n")
+
+# Plot the results
+ggplot(results_df, aes(x = Date)) +
+  geom_line(aes(y = Predicted, colour = "Predicted")) +
+  geom_line(aes(y = Actual,    colour = "Actual")) +
+  geom_ribbon(aes(ymin = Lower, ymax = Upper), fill = "blue", alpha = 0.1) +
+  labs(
+    title = "Predicted vs Actual Returns",
+    x = "Date",
+    y = "Returns",
+    colour = ""
+  ) +
+  theme_minimal()
+
+#############################
+#### Inspect diagnostics ####
+#############################
+
+summary(model)
+
+param_diag_df <- bind_rows(diagnostics)
+
+# Plot Rhats
+ggplot(param_diag_df, aes(x = Date, y = Rhat)) +
+  geom_line(color = "blue") +
+  facet_wrap(~Parameter, scales = "free_y") +
+  labs(
+    title = "Rhat over time per parameter",
+    x = "Date",
+    y = "Rhat"
+  ) +
+  theme_minimal()
+
+# Plot ESS
+# Convert bulk and tail ESS to long format
+ess_long <- param_diag_df %>%
+  pivot_longer(
+    cols = c(ESS_Bulk, ESS_Tail),
+    names_to = "ESS_Type",
+    values_to = "ESS_Value"
+  )
+
+ggplot(ess_long, aes(x = Date, y = ESS_Value, linetype = ESS_Type)) +
+  geom_line(color = "blue") +                
+  facet_wrap(~Parameter, scales = "free_y") +          
+  labs(
+    title = "ESS (Bulk and Tail) over time per parameter",
+    x = "Date",
+    y = "ESS",
+    linetype = "Type"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+  )
+
+mcmc_plot(model, type="trace")
+
+# Posterior predictive checks
+pp_check(model)
