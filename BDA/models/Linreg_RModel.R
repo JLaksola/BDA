@@ -26,7 +26,8 @@ df <- read.csv(file_path, stringsAsFactors = FALSE) %>%
     Date = as.Date(Date),
     inv_CAPE = 1 / CAPE,
     CAPE_scaled = scale(CAPE),
-    Inflation_scaled = scale(Inflation)
+    Inflation_scaled = scale(Inflation),
+    Real_Return_10Y_scaled = scale(Real_Return_10Y)
   ) %>%
   filter(complete.cases(.)) %>%
   arrange(Date)
@@ -40,6 +41,7 @@ predictions   <- c()
 actuals       <- c()
 lowers        <- c()
 uppers        <- c()
+lpds         <- c()
 dates         <- as.Date(character())
 diagnostics   <- list()
 
@@ -115,7 +117,6 @@ convergence_diagnostics <- function(current_date, model){
   for (i in seq_along(param_cols)) {
     par <- param_cols[i]
     par_draws <- draws_array[,,par]  # iterations x chains
-    print(par_draws)
     rhat_vals[i] <- rhat(par_draws)
     ess_bulk_vals[i] <- ess_bulk(par_draws)
     ess_tail_vals[i] <- ess_tail(par_draws)
@@ -133,20 +134,43 @@ convergence_diagnostics <- function(current_date, model){
   return (diag_df)
 }
 
+# Compute lpd
+compute_log_pred_density <- function(model, newdata) {
+  # 1. Get the log-likelihood for the new data point(s) given each posterior sample.
+  # This returns a matrix of dimensions (number of posterior samples) x (number of data points)
+  log_lik_matrix <- log_lik(model, newdata = newdata, allow_new_levels = TRUE)
+  
+  # 2. Convert log-likelihoods to likelihoods (p(y_i|theta^{(s)}))
+  likelihoods_matrix <- exp(log_lik_matrix)
+  
+  # 3. Calculate the LPD for each data point: log( (1/S) * sum(likelihoods) )
+  # We use the 'colMeans' to get the mean of the likelihoods across all posterior samples (rows)
+  # Then we take the log.
+  log_pred_density <- log(colMeans(likelihoods_matrix))
+  
+  # log_pred_density is a vector, one LPD for each row in newdata.
+  # Since your loop only uses one test sample (row) at a time, we return the first element.
+  return(log_pred_density[1])
+}
+
 ######################
 #### Define Model ####
 ######################
 
 # Formula for bayesian model
 formula <- bf(
-  Real_Return_10Y ~ 1 + CAPE + (1 | Inflation_Category),
+  Real_Return_10Y ~ 1 + CAPE_scaled + (1 + CAPE_scaled | Inflation_Category),
   family = "gaussian",
   center = FALSE
 )
 
 priors <- c(
-  prior(normal(0, 1), class = "b"),
-  prior(normal(0, 1), class = "sd")
+  prior(normal(0, 1), coef = "Intercept"),    
+  prior(normal(0, 0.5), class = "b", coef = "CAPE_scaled"),
+  prior(normal(0, 3), class = "sd", group = "Inflation_Category", coef = "Intercept"), 
+  prior(normal(0, 3), class = "sd", group = "Inflation_Category", coef = "CAPE_scaled"),
+  prior(lkj(2), class = "cor"),
+  prior(student_t(3, 0, 1), class = "sigma")
 )
 
 ###########################
@@ -166,7 +190,10 @@ model <- brm(
   iter = 2000,
   warmup = 1000,
   backend = "cmdstanr",
-  cores = cores
+  cores = cores,
+  adapt_delta = 0.99,
+  max_treedepth = 20,
+  seed = 1
 )
 
 ##################################################
@@ -175,7 +202,11 @@ model <- brm(
 
 for (i in seq_along(test_dates)) {
   
-  if (i > 10){
+  if (i %% 1 != 0){
+    next
+  }
+  
+  if (i > 1){
     break
   }
   
@@ -192,6 +223,7 @@ for (i in seq_along(test_dates)) {
   upper <- preds[3]
   y_true <- test_sample$Real_Return_10Y
   rmse_i <- sqrt(mean((y_true - y_pred)^2))
+  lpd <- compute_log_pred_density(model, test_sample)
   
   # Store results
   rmse_list     <- c(rmse_list, rmse_i)
@@ -200,6 +232,7 @@ for (i in seq_along(test_dates)) {
   lowers        <- c(lowers, lower)
   uppers        <- c(uppers, upper)
   dates         <- c(dates, current_date)
+  lpds         <- c(lpds, lpd)
   
   # Store convergence diagnostics
   diagnostics[[i]] <- convergence_diagnostics(current_date, model)
@@ -241,9 +274,11 @@ results_df <- data.frame(
 # Overall RMSE and R-squared
 overall_rmse <- sqrt(mean((results_df$Actual - results_df$Predicted)^2))
 r_squared    <- cor(results_df$Actual, results_df$Predicted)^2
+total_elpd   <- sum(lpds)
 
 cat("Overall RMSE:", overall_rmse, "\n")
 cat("Overall R-squared:", r_squared, "\n")
+cat("Overall ELPD:", total_elpd, "\n")
 
 # Plot the results
 ggplot(results_df, aes(x = Date)) +
@@ -304,3 +339,8 @@ mcmc_plot(model, type="trace")
 
 # Posterior predictive checks
 pp_check(model)
+pp_check(model, type = "scatter_avg")
+pp_check(model, type = "intervals")
+pp_check(model, type = "error_hist")
+pp_check(model, type = "error_scatter")
+pp_check(model, type = "dens_overlay_grouped", group = "Inflation_Category")
