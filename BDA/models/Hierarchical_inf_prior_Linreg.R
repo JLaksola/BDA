@@ -50,16 +50,15 @@ n_iter     <- length(test_dates)
 ######################
 
 formula <- bf(
-  Real_Return_10Y ~ 1 + CAPE,
+  Real_Return_10Y ~ 1 + CAPE + (1 + CAPE | Inflation_Category),
   family = "gaussian"
 )
 
-current_priors <- build_priors_from_window(
+current_priors <- build_hierarchical_priors_from_window(
   df            = df,
   train_end     = as.Date("1980-01-01"),
   window_months = 360
 )
-
 current_priors
 
 ##################################################
@@ -92,7 +91,7 @@ for (k in seq_along(prior_update_dates)) {
   train <- df %>%
     filter(Date >= train_start, Date <= train_end)
   
-  current_priors <- build_priors_from_window(
+  current_priors <- build_hierarchical_priors_from_window(
     df            = df,
     train_end     = train_end,
     window_months = 360
@@ -108,13 +107,15 @@ for (k in seq_along(prior_update_dates)) {
   
   model <- brm(
     formula = formula,
-    prior   = current_priors,
-    data    = train,
-    chains  = 3,
-    iter    = 2000,
-    warmup  = 1000,
-    cores   = cores,
+    prior = current_priors,
+    data = train,
+    chains = 3,
+    iter = 2000,
+    warmup = 1000,
     backend = "cmdstanr",
+    cores = cores,
+    adapt_delta = 0.99,
+    max_treedepth = 20,
     seed = 1
   )
   
@@ -263,6 +264,8 @@ ggplot(ess_long, aes(x = Date, y = ESS_Value, linetype = ESS_Type)) +
   theme_minimal() +
   theme(legend.position = "bottom")
 
+
+
 mcmc_plot(model, type="trace")
 
 # Posterior predictive checks
@@ -313,7 +316,5 @@ priors_df <- priors_df %>%
 write.csv(priors_df, "priors_used.csv", row.names = FALSE)
 
 # Save the model
-saveRDS(model, file = "Inf_linreg_model.rds")
-
-
+saveRDS(model, file = "Hierarchical_inf_model.rds")
 

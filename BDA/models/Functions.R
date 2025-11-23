@@ -32,8 +32,8 @@ make_rate_bins_LOW_HIGH <- function(train, df, col = "GS10") {
 
 
 #### Build priors
+
 build_priors_from_window <- function(df, train_end, window_months = 360) {
-  # Start of prior window: 360 months before train_end
   prior_start <- train_end %m-% months(window_months)
   
   prior_window <- df %>%
@@ -43,29 +43,80 @@ build_priors_from_window <- function(df, train_end, window_months = 360) {
     stop("Not enough data in prior_window to estimate priors.")
   }
   
-  # Classical linear regression on the prior window
   lm_fit <- lm(Real_Return_10Y ~ CAPE, data = prior_window)
-  summ <- summary(lm_fit)
-  
+  summ   <- summary(lm_fit)
   beta_tab <- summ$coefficients
   
   intercept_mean <- beta_tab["(Intercept)", "Estimate"]
-  intercept_sd <- beta_tab["(Intercept)", "Std. Error"]
+  intercept_sd   <- beta_tab["(Intercept)", "Std. Error"]
   
   slope_mean <- beta_tab["CAPE", "Estimate"]
-  slope_sd <- beta_tab["CAPE", "Std. Error"]
+  slope_sd   <- beta_tab["CAPE", "Std. Error"]
   
-  sigma_hat <- summ$sigma  # residual sd from OLS
+  # Build the prior strings
+  slope_prior_str     <- paste0("normal(", slope_mean, ", ", slope_sd, ")")
+  intercept_prior_str <- paste0("normal(", intercept_mean, ", ", intercept_sd, ")")
   
+  # Use do.call so prior() sees *character* constants, not expressions
   priors <- c(
-    prior(normal(intercept_mean, intercept_sd), class = "b", coef = "Intercept"),
-    prior(normal(slope_mean, slope_sd), class = "b", coef = "CAPE"),
-    # sigma prior: centered around 0 with scale sigma_hat, truncated > 0 by brms
-    prior(student_t(3, 0, sigma_hat), class = "sigma")
+    do.call(
+      prior,
+      list(slope_prior_str, class = "b", coef = "CAPE")
+    ),
+    do.call(
+      prior,
+      list(intercept_prior_str, class = "Intercept")
+    )
   )
   
-  return(priors)
+  priors
 }
+
+# Hierarchical priors
+build_hierarchical_priors_from_window <- function(df, train_end, window_months = 360) {
+  prior_start <- train_end %m-% months(window_months)
+  
+  prior_window <- df %>%
+    dplyr::filter(Date > prior_start, Date <= train_end)
+  
+  if (nrow(prior_window) < 50) {
+    stop("Not enough data in prior_window to estimate priors.")
+  }
+  
+  # OLS on the prior window
+  lm_fit   <- lm(Real_Return_10Y ~ CAPE, data = prior_window)
+  summ     <- summary(lm_fit)
+  beta_tab <- summ$coefficients
+  
+  intercept_mean <- beta_tab["(Intercept)", "Estimate"]
+  intercept_sd   <- beta_tab["(Intercept)", "Std. Error"]
+  slope_mean     <- beta_tab["CAPE",        "Estimate"]
+  slope_sd       <- beta_tab["CAPE",        "Std. Error"]
+  
+  # Optionally inflate the SEs a bit to avoid over-confident priors
+  slope_sd      <- max(slope_sd * 2, 0.1)
+  intercept_sd  <- max(intercept_sd * 2, 0.5)
+  
+  slope_prior_str     <- paste0("normal(", slope_mean,     ", ", slope_sd,     ")")
+  intercept_prior_str <- paste0("normal(", intercept_mean, ", ", intercept_sd, ")")
+  
+  priors <- c(
+    do.call(
+      prior,
+      list(slope_prior_str, class = "b", coef = "CAPE")
+    ),
+    do.call(
+      prior,
+      list(intercept_prior_str, class = "Intercept")
+    ),
+    # NEW: hierarchical structure priors (do not depend on the window)
+    prior(exponential(1), class = "sd"),   # group-level SDs for random effects
+    prior(lkj(2),         class = "cor")   # correlation between intercept & slope REs
+  )
+  
+  priors
+}
+
 
 ###########################
 #### Utility functions ####
@@ -117,6 +168,25 @@ convergence_diagnostics <- function(current_date, model){
   )
   
   return (diag_df)
+}
+
+# Compute lpd
+compute_log_pred_density <- function(model, newdata) {
+  # 1. Get the log-likelihood for the new data point(s) given each posterior sample.
+  # This returns a matrix of dimensions (number of posterior samples) x (number of data points)
+  log_lik_matrix <- log_lik(model, newdata = newdata, allow_new_levels = TRUE)
+  
+  # 2. Convert log-likelihoods to likelihoods (p(y_i|theta^{(s)}))
+  likelihoods_matrix <- exp(log_lik_matrix)
+  
+  # 3. Calculate the LPD for each data point: log( (1/S) * sum(likelihoods) )
+  # We use the 'colMeans' to get the mean of the likelihoods across all posterior samples (rows)
+  # Then we take the log.
+  log_pred_density <- log(colMeans(likelihoods_matrix))
+  
+  # log_pred_density is a vector, one LPD for each row in newdata.
+  # Since your loop only uses one test sample (row) at a time, we return the first element.
+  return(log_pred_density[1])
 }
 
 

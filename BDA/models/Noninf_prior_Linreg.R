@@ -1,20 +1,21 @@
-rm(list=ls())
-library(lubridate)   
-library(ggplot2)     
-library(dplyr)      
+rm(list = ls())
+library(lubridate)
+library(ggplot2)
+library(dplyr)
 library(brms)
 library(purrr)
 library(parallel)
 library(posterior)
 library(tidyr)
-source("~/Desktop/BDA/models/Functions.R")
+setwd("C:/Users/Käyttäjä/Desktop/BDA/models")
+source("C:/Users/Käyttäjä/Desktop/BDA/models/Functions.R")
 
 # Comment this out if cmdstan works
 # install.packages("cmdstanr", repos = c("https://mc-stan.org/r-packages/",getOption("repos")))
 library(cmdstanr)
-# dir.create(file.path("~/cmdstan"), showWarnings = FALSE)
-# install_cmdstan(dir = "~/cmdstan")
-# set_cmdstan_path("~/cmdstan/cmdstan-2.37.0")
+#dir.create(file.path("~/cmdstan"), showWarnings = FALSE)
+#install_cmdstan(dir = "~/cmdstan", overwrite = TRUE)
+set_cmdstan_path("~/cmdstan/cmdstan-2.37.0")
 
 cores <- max(1, parallel::detectCores() - 1)
 
@@ -22,7 +23,7 @@ cores <- max(1, parallel::detectCores() - 1)
 #### Preprocess Data ####
 #########################
 
-file_path <- "~/Desktop/BDA/data/processed/Shiller_cleaned.csv"
+file_path <- "C:/Users/Käyttäjä/Desktop/BDA/data/processed/Shiller_cleaned.csv"
 df <- read.csv(file_path, stringsAsFactors = FALSE) %>%
   mutate(
     Date = as.Date(Date),
@@ -42,6 +43,7 @@ predictions   <- c()
 actuals       <- c()
 lowers        <- c()
 uppers        <- c()
+lpds         <- c()
 dates         <- as.Date(character())
 diagnostics   <- list()
 
@@ -50,58 +52,6 @@ test_dates <- seq(from = test_start, to = test_end, by = "month")
 n_iter <- length(test_dates)
 
 window_size <- 120
-
-###########################
-#### Utility functions ####
-###########################
-
-# Function for generating posterior predictions
-generate_prediction <- function(model, newdata, prob = 0.95){
-  posterior_draws <- posterior_epred(
-    model,
-    newdata = newdata,
-    allow_new_levels = TRUE
-  )
-  pred_mean <- mean(posterior_draws)
-  ci_lower <- quantile(posterior_draws, probs = (1 - prob) / 2)
-  ci_upper <- quantile(posterior_draws, probs = 1 - (1 - prob) / 2)
-  return (c(pred_mean, ci_lower, ci_upper))
-}
-
-# Store convergence diagnostics
-convergence_diagnostics <- function(current_date, model){
-  # Posterior parameter draws
-  draws_array <- as_draws_array(model)
-  
-  # Automatically select parameter columns (exclude metadata/internal columns)
-  param_cols <- setdiff(dimnames(draws_array)[[3]], c("lp__", "lprior"))
-  
-  # Initialize vectors to store diagnostics
-  rhat_vals <- numeric(length(param_cols))
-  ess_bulk_vals <- numeric(length(param_cols))
-  ess_tail_vals <- numeric(length(param_cols))
-  
-  # Loop over parameters
-  for (i in seq_along(param_cols)) {
-    par <- param_cols[i]
-    par_draws <- draws_array[,,par]  # iterations x chains
-    print(par_draws)
-    rhat_vals[i] <- rhat(par_draws)
-    ess_bulk_vals[i] <- ess_bulk(par_draws)
-    ess_tail_vals[i] <- ess_tail(par_draws)
-  }
-  
-  # Combine into data frame
-  diag_df <- data.frame(
-    Date      = current_date,
-    Parameter = param_cols,
-    Rhat      = rhat_vals,
-    ESS_Bulk  = ess_bulk_vals,
-    ESS_Tail  = ess_tail_vals
-  )
-  
-  return (diag_df)
-}
 
 ######################
 #### Define Model ####
@@ -114,10 +64,8 @@ formula <- bf(
   center = FALSE
 )
 
-priors <- c(
-  prior(normal(0, 1), class = "b"),
-  prior(normal(0, 1), class = "sd")
-)
+priors <- 
+  c(prior( normal(-0.5, 0.5), class = "b", coef = "CAPE"))
 
 ###########################
 #### Fit Initial Model ####
@@ -136,7 +84,8 @@ model <- brm(
   iter = 2000,
   warmup = 1000,
   backend = "cmdstanr",
-  cores = cores
+  cores = cores,
+  seed = 1
 )
 
 ##################################################
@@ -144,10 +93,6 @@ model <- brm(
 ##################################################
 
 for (i in seq_along(test_dates)) {
-  
-  if (i > 10){
-    break
-  }
   
   start <- proc.time()
   
@@ -161,15 +106,15 @@ for (i in seq_along(test_dates)) {
   lower <- preds[2]
   upper <- preds[3]
   y_true <- test_sample$Real_Return_10Y
-  rmse_i <- sqrt(mean((y_true - y_pred)^2))
+  lpd <- compute_log_pred_density(model, test_sample)
   
   # Store results
-  rmse_list     <- c(rmse_list, rmse_i)
   predictions   <- c(predictions, as.numeric(y_pred))
   actuals       <- c(actuals, as.numeric(y_true))
   lowers        <- c(lowers, lower)
   uppers        <- c(uppers, upper)
   dates         <- c(dates, current_date)
+  lpds          <- c(lpds, lpd)
   
   # Store convergence diagnostics
   diagnostics[[i]] <- convergence_diagnostics(current_date, model)
@@ -196,14 +141,13 @@ for (i in seq_along(test_dates)) {
 
 # Convert results to data frame
 results_df <- data.frame(
-  Date         = dates,
-  Predicted    = predictions,
-  Actual       = actuals,
-  Upper        = uppers,
-  Lower        = lowers,
-  RMSE         = rmse_list
+  Date      = dates_vec,
+  Predicted = predictions,
+  Actual    = actuals,
+  Upper     = uppers,
+  Lower     = lowers,
+  Lpds      = lpds
 )
-
 ###########################
 #### Inspect Results ####
 ###########################
@@ -214,6 +158,7 @@ r_squared    <- cor(results_df$Actual, results_df$Predicted)^2
 
 cat("Overall RMSE:", overall_rmse, "\n")
 cat("Overall R-squared:", r_squared, "\n")
+cat("Overall ELPD:", total_elpd, "\n")
 
 # Plot the results
 ggplot(results_df, aes(x = Date)) +
@@ -274,3 +219,53 @@ mcmc_plot(model, type="trace")
 
 # Posterior predictive checks
 pp_check(model)
+pp_check(model, type = "scatter_avg")
+pp_check(model, type = "intervals")
+pp_check(model, type = "error_hist")
+pp_check(model, type = "error_scatter")
+pp_check(model, type = "dens_overlay_grouped", group = "Inflation_Category")
+
+
+# Save the diagnostics and results
+diagnostics_df <- bind_rows(diagnostics)
+
+# as CSVs
+write.csv(results_df,     "results_forecast.csv",     row.names = FALSE)
+write.csv(diagnostics_df, "diagnostics_forecast.csv", row.names = FALSE)
+
+# Save the model summary
+smry <- summary(model)
+
+# Save the printed version
+capture.output(
+  print(smry),
+  file = "model_summary.txt"
+)
+
+# Save the model priors
+# Flatten priors_used into a single data frame
+priors_df <- map_dfr(priors_used, function(x) {
+  if (is.null(x)) return(NULL)  # in case some entries are empty
+  
+  p_df <- as.data.frame(x$priors)  # brmsprior -> data frame
+  
+  # Add block-level info to each prior row
+  p_df$block      <- x$block
+  p_df$prior_date <- x$prior_date
+  p_df$train_end  <- x$train_end
+  
+  p_df
+})
+
+# Optional: reorder columns a bit
+priors_df <- priors_df %>%
+  select(block, prior_date, train_end, everything())
+
+# Save to CSV
+write.csv(priors_df, "priors_used.csv", row.names = FALSE)
+
+# Save the model
+saveRDS(model, file = "Noninf_linreg_model.rds")
+
+
+
