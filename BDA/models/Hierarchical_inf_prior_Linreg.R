@@ -51,9 +51,10 @@ n_iter     <- length(test_dates)
 
 formula <- bf(
   Real_Return_10Y ~ 1 + CAPE + (1 + CAPE | Inflation_Category),
-  family = "gaussian"
+  family = "gaussian",
+  center = FALSE
 )
-
+get_prior(formula,data=df)
 current_priors <- build_hierarchical_priors_from_window(
   df            = df,
   train_end     = as.Date("1980-01-01"),
@@ -209,6 +210,7 @@ results_df <- data.frame(
 
 overall_rmse <- sqrt(mean((results_df$Actual - results_df$Predicted)^2))
 r_squared    <- cor(results_df$Actual, results_df$Predicted)^2
+total_elpd   <- sum(lpds)
 
 cat("Overall RMSE:", overall_rmse, "\n")
 cat("Overall R-squared:", r_squared, "\n")

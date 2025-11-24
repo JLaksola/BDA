@@ -32,7 +32,6 @@ make_rate_bins_LOW_HIGH <- function(train, df, col = "GS10") {
 
 
 #### Build priors
-
 build_priors_from_window <- function(df, train_end, window_months = 360) {
   prior_start <- train_end %m-% months(window_months)
   
@@ -65,14 +64,14 @@ build_priors_from_window <- function(df, train_end, window_months = 360) {
     ),
     do.call(
       prior,
-      list(intercept_prior_str, class = "Intercept")
+      list(intercept_prior_str, class = "b", coef = "Intercept")
     )
   )
   
   priors
 }
 
-# Hierarchical priors
+# Hierarchical priors (bad)
 build_hierarchical_priors_from_window <- function(df, train_end, window_months = 360) {
   prior_start <- train_end %m-% months(window_months)
   
@@ -110,7 +109,52 @@ build_hierarchical_priors_from_window <- function(df, train_end, window_months =
       list(intercept_prior_str, class = "Intercept")
     ),
     # NEW: hierarchical structure priors (do not depend on the window)
-    prior(exponential(1), class = "sd"),   # group-level SDs for random effects
+    prior(exponential(0.5), class = "sd"),   # group-level SDs for random effects
+    prior(lkj(2),         class = "cor")   # correlation between intercept & slope REs
+  )
+  
+  priors
+}
+
+# Hierarchical priors (improved)
+build_hierarchical_priors_from_window <- function(df, train_end, window_months = 360) {
+  prior_start <- train_end %m-% months(window_months)
+  
+  prior_window <- df %>%
+    dplyr::filter(Date > prior_start, Date <= train_end)
+  
+  if (nrow(prior_window) < 50) {
+    stop("Not enough data in prior_window to estimate priors.")
+  }
+  
+  # OLS on the prior window
+  lm_fit   <- lm(Real_Return_10Y ~ CAPE, data = prior_window)
+  summ     <- summary(lm_fit)
+  beta_tab <- summ$coefficients
+  
+  intercept_mean <- beta_tab["(Intercept)", "Estimate"]
+  intercept_sd   <- beta_tab["(Intercept)", "Std. Error"]
+  slope_mean     <- beta_tab["CAPE",        "Estimate"]
+  slope_sd       <- beta_tab["CAPE",        "Std. Error"]
+  
+  # Optionally inflate the SEs a bit to avoid over-confident priors
+  slope_sd      <- max(slope_sd * 2, 0.1)
+  intercept_sd  <- max(intercept_sd * 2, 0.5)
+  
+  slope_prior_str     <- paste0("normal(", slope_mean,     ", ", slope_sd,     ")")
+  intercept_prior_str <- paste0("normal(", intercept_mean, ", ", intercept_sd, ")")
+  
+  priors <- c(
+    do.call(
+      prior,
+      list(slope_prior_str, class = "b", coef = "CAPE")
+    ),
+    do.call(
+      prior,
+      list(intercept_prior_str, class = "Intercept")
+    ),
+    # NEW: hierarchical structure priors (do not depend on the window)
+    prior(exponential(0.5), class = "sd"),   # group-level SDs for random effects
     prior(lkj(2),         class = "cor")   # correlation between intercept & slope REs
   )
   

@@ -51,7 +51,8 @@ n_iter     <- length(test_dates)
 
 formula <- bf(
   Real_Return_10Y ~ 1 + CAPE,
-  family = "gaussian"
+  family = "gaussian",
+  center = FALSE
 )
 
 current_priors <- build_priors_from_window(
@@ -206,8 +207,31 @@ results_df <- data.frame(
   Lpds      = lpds
 )
 
+###########
+# Import data
+setwd("C:/Users/Käyttäjä/Desktop/BDA/models/Results_inf_prior")
+
+# 1. Rolling-forecast results
+results_df <- read.csv("results_forecast.csv", stringsAsFactors = FALSE)
+results_df$Date <- as.Date(results_df$Date)   # convert back to Date
+
+# 2. Convergence diagnostics over time
+diagnostics_df <- read.csv("diagnostics_forecast.csv", stringsAsFactors = FALSE)
+diagnostics_df$Date <- as.Date(diagnostics_df$Date)
+
+# 3. Priors used in each block
+priors_df <- read.csv("priors_used.csv", stringsAsFactors = FALSE)
+priors_df$prior_date <- as.Date(priors_df$prior_date)
+priors_df$train_end  <- as.Date(priors_df$train_end)
+
+# 4. Fitted model object (last model in the loop)
+model <- readRDS("Inf_linreg_model.rds")
+###########
+
+
 overall_rmse <- sqrt(mean((results_df$Actual - results_df$Predicted)^2))
 r_squared    <- cor(results_df$Actual, results_df$Predicted)^2
+total_elpd   <- sum(results_df$Lpds)
 
 cat("Overall RMSE:", overall_rmse, "\n")
 cat("Overall R-squared:", r_squared, "\n")
@@ -271,7 +295,6 @@ pp_check(model, type = "scatter_avg")
 pp_check(model, type = "intervals")
 pp_check(model, type = "error_hist")
 pp_check(model, type = "error_scatter")
-pp_check(model, type = "dens_overlay_grouped", group = "Inflation_Category")
 
 
 # Save the diagnostics and results

@@ -63,9 +63,10 @@ formula <- bf(
   family = "gaussian",
   center = FALSE
 )
-
+get_prior(formula, data = df)
 priors <- 
-  c(prior( normal(-0.5, 0.5), class = "b", coef = "CAPE"))
+  c(prior(normal(-0.5, 0.5), class = "b", coef = "CAPE"),
+    prior(normal(14,5), class = "b", coef = "Intercept"))
 
 ###########################
 #### Fit Initial Model ####
@@ -141,7 +142,7 @@ for (i in seq_along(test_dates)) {
 
 # Convert results to data frame
 results_df <- data.frame(
-  Date      = dates_vec,
+  Date      = dates,
   Predicted = predictions,
   Actual    = actuals,
   Upper     = uppers,
@@ -152,9 +153,26 @@ results_df <- data.frame(
 #### Inspect Results ####
 ###########################
 
+###########
+# Import data
+setwd("C:/Users/Käyttäjä/Desktop/BDA/models/Results_Noninf_prior")
+
+# 1. Rolling-forecast results
+results_df <- read.csv("results_forecast.csv", stringsAsFactors = FALSE)
+results_df$Date <- as.Date(results_df$Date)   # convert back to Date
+
+# 2. Convergence diagnostics over time
+diagnostics_df <- read.csv("diagnostics_forecast.csv", stringsAsFactors = FALSE)
+diagnostics_df$Date <- as.Date(diagnostics_df$Date)
+
+# 3. Fitted model object (last model in the loop)
+model <- readRDS("Noninf_linreg_model.rds")
+###########
+
 # Overall RMSE and R-squared
 overall_rmse <- sqrt(mean((results_df$Actual - results_df$Predicted)^2))
 r_squared    <- cor(results_df$Actual, results_df$Predicted)^2
+total_elpd   <- sum(results_df$Lpds)
 
 cat("Overall RMSE:", overall_rmse, "\n")
 cat("Overall R-squared:", r_squared, "\n")
@@ -223,7 +241,6 @@ pp_check(model, type = "scatter_avg")
 pp_check(model, type = "intervals")
 pp_check(model, type = "error_hist")
 pp_check(model, type = "error_scatter")
-pp_check(model, type = "dens_overlay_grouped", group = "Inflation_Category")
 
 
 # Save the diagnostics and results
@@ -241,28 +258,6 @@ capture.output(
   print(smry),
   file = "model_summary.txt"
 )
-
-# Save the model priors
-# Flatten priors_used into a single data frame
-priors_df <- map_dfr(priors_used, function(x) {
-  if (is.null(x)) return(NULL)  # in case some entries are empty
-  
-  p_df <- as.data.frame(x$priors)  # brmsprior -> data frame
-  
-  # Add block-level info to each prior row
-  p_df$block      <- x$block
-  p_df$prior_date <- x$prior_date
-  p_df$train_end  <- x$train_end
-  
-  p_df
-})
-
-# Optional: reorder columns a bit
-priors_df <- priors_df %>%
-  select(block, prior_date, train_end, everything())
-
-# Save to CSV
-write.csv(priors_df, "priors_used.csv", row.names = FALSE)
 
 # Save the model
 saveRDS(model, file = "Noninf_linreg_model.rds")
