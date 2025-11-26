@@ -1,0 +1,26 @@
+ Family: gaussian 
+  Links: mu = identity 
+Formula: Real_Return_10Y ~ 1 + CAPE + (1 + CAPE | Period30) 
+   Data: train (Number of observations: 1485) 
+  Draws: 3 chains, each with iter = 2000; warmup = 1000; thin = 1;
+         total post-warmup draws = 3000
+
+Multilevel Hyperparameters:
+~Period30 (Number of levels: 5) 
+                    Estimate Est.Error l-95% CI u-95% CI Rhat Bulk_ESS Tail_ESS
+sd(Intercept)           4.03      1.27     2.19     7.12 1.00     1059     1515
+sd(CAPE)                0.33      0.13     0.18     0.65 1.01      933     1470
+cor(Intercept,CAPE)    -0.40      0.29    -0.84     0.25 1.00     1318     1432
+
+Regression Coefficients:
+          Estimate Est.Error l-95% CI u-95% CI Rhat Bulk_ESS Tail_ESS
+Intercept    15.25      0.63    14.00    16.49 1.00     1848     2069
+CAPE         -0.41      0.03    -0.48    -0.35 1.00     2461     1733
+
+Further Distributional Parameters:
+      Estimate Est.Error l-95% CI u-95% CI Rhat Bulk_ESS Tail_ESS
+sigma     3.66      0.07     3.53     3.80 1.00     3289     1946
+
+Draws were sampled using sample(hmc). For each parameter, Bulk_ESS
+and Tail_ESS are effective sample size measures, and Rhat is the potential
+scale reduction factor on split chains (at convergence, Rhat = 1).
