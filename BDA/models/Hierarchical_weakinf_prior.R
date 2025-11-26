@@ -47,8 +47,9 @@ lpds         <- c()
 dates         <- as.Date(character())
 diagnostics   <- list()
 
-# Generate monthly dates
-test_dates <- seq(from = test_start, to = test_end, by = "month")
+# Generate monthly dates, then take every 6th month as a test point
+all_test_dates <- seq(from = test_start, to = test_end, by = "month")
+test_dates <- all_test_dates[seq(1, length(all_test_dates), by = 6)]
 n_iter <- length(test_dates)
 
 window_size <- 120
@@ -59,14 +60,16 @@ window_size <- 120
 
 # Formula for bayesian model
 formula <- bf(
-  Real_Return_10Y ~ 1 + CAPE,
+  Real_Return_10Y ~ 1 + CAPE + (1 + CAPE | Inflation_Category),
   family = "gaussian",
   center = FALSE
 )
+
 get_prior(formula, data = df)
 priors <- 
   c(prior(normal(-0.5, 0.5), class = "b", coef = "CAPE"),
-    prior(normal(14,5), class = "b", coef = "Intercept"))
+    prior(normal(14,5), class = "b", coef = "Intercept"),
+    prior(lkj(1), class = "cor"))
 
 ###########################
 #### Fit Initial Model ####
@@ -85,7 +88,9 @@ model <- brm(
   iter = 2000,
   warmup = 1000,
   backend = "cmdstanr",
+  adapt_delta = 0.99,
   cores = cores,
+  max_treedepth = 20,
   seed = 1
 )
 
@@ -120,8 +125,8 @@ for (i in seq_along(test_dates)) {
   # Store convergence diagnostics
   diagnostics[[i]] <- convergence_diagnostics(current_date, model)
   
-  # New datapoint for training set
-  train_end <- train_end %m+% lubridate::period(months = 1)
+  # Advance training window by 6 months between test points
+  train_end <- train_end %m+% lubridate::period(months = 6)
   train <- df %>%
     filter(Date >= train_start, Date <= train_end)
   
@@ -155,7 +160,7 @@ results_df <- data.frame(
 
 ###########
 # Import data
-setwd("C:/Users/Käyttäjä/Desktop/BDA/models/Results_Noninf_prior")
+setwd("C:/Users/Käyttäjä/Desktop/BDA/models/Results_weakinf_hierarchical")
 
 # 1. Rolling-forecast results
 results_df <- read.csv("results_forecast.csv", stringsAsFactors = FALSE)
@@ -166,7 +171,7 @@ diagnostics_df <- read.csv("diagnostics_forecast.csv", stringsAsFactors = FALSE)
 diagnostics_df$Date <- as.Date(diagnostics_df$Date)
 
 # 3. Fitted model object (last model in the loop)
-model <- readRDS("Noninf_linreg_model.rds")
+model <- readRDS("Weakinf_hierarchical_model.rds")
 ###########
 
 # Overall RMSE and R-squared
@@ -260,7 +265,7 @@ capture.output(
 )
 
 # Save the model
-saveRDS(model, file = "Noninf_linreg_model.rds")
+saveRDS(model, file = "Weakinf_hierarchical_model.rds")
 
 
 

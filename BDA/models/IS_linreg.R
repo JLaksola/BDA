@@ -31,6 +31,7 @@ lm_list <- df %>%
 
 lm_full <- lm(Real_Return_10Y ~ CAPE * Period, data = df)
 
+
 # 2A. One plot, all periods with separate regression lines
 ggplot(df, aes(x = CAPE, y = Real_Return_10Y, colour = Period)) +
   geom_point(alpha = 0.4, size = 1) +
@@ -44,7 +45,7 @@ ggplot(df, aes(x = CAPE, y = Real_Return_10Y, colour = Period)) +
 
 
 # Lm with inflation categories
-insample_start <- as.Date("1985-01-01")
+insample_start <- as.Date("1900-01-01")
 insample_end   <- as.Date("2015-09-01")
 
 insample_df <- df %>%

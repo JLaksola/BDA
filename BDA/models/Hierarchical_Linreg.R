@@ -11,9 +11,9 @@ library(tidyr)
 # Comment this out if cmdstan works
 # install.packages("cmdstanr", repos = c("https://mc-stan.org/r-packages/",getOption("repos")))
 library(cmdstanr)
-# dir.create(file.path("~/cmdstan"), showWarnings = FALSE)
-# install_cmdstan(dir = "~/cmdstan")
-# set_cmdstan_path("~/cmdstan/cmdstan-2.37.0")
+#dir.create(file.path("~/cmdstan"), showWarnings = FALSE)
+#install_cmdstan(dir = "~/cmdstan")
+set_cmdstan_path("~/cmdstan/cmdstan-2.37.0")
 
 cores <- max(1, parallel::detectCores() - 1)
 
@@ -21,7 +21,7 @@ cores <- max(1, parallel::detectCores() - 1)
 #### Preprocess Data ####
 #########################
 
-file_path <- "~/Desktop/BDA/data/processed/Shiller_cleaned.csv"
+file_path <- "C:/Users/Käyttäjä/Desktop/BDA/data/processed/Shiller_cleaned.csv"
 df <- read.csv(file_path, stringsAsFactors = FALSE) %>%
   mutate(
     Date = as.Date(Date),
@@ -48,66 +48,16 @@ diagnostics   <- list()
 test_dates <- seq(from = test_start, to = test_end, by = "month")
 n_iter <- length(test_dates)
 
-# Function for rolling window inflation category calculation
-inflation_cats <- function(past_values, current_value){
-  # jos nykyinen arvo on NA, palautetaan NA
-  if (is.na(current_value)) {
-    return(NA_character_)
-  }
-  
-  # tyhjää historiaa ei oikeasti synny, koska sulla on max(1, .x-window) jne.,
-  # mutta pidetään tämä mukana:
-  if (length(past_values) == 0) {
-    return("negative")
-  }
-  
-  past_values <- past_values[!is.na(past_values)]
-  pos_values  <- past_values[past_values >= 0]
-  pos_median  <- if (length(pos_values) == 0) 0 else median(pos_values)
-  
-  if (current_value < 0) {
-    "negative"
-  } else if (current_value < pos_median) {
-    "low"
-  } else {
-    "high"
-  }
-}
-
-
-df$Inflation_10Y_Rolling <- zoo::rollmean(df$Inflation,
-                                          k = 120,
-                                          fill = NA,
-                                          align = "right")
-
-# poistetaan NA:t rullaavasta
-df <- df %>%
-  filter(!is.na(Inflation_10Y_Rolling))
-
-window_size <- 120
-
-# luodaan kategoriasarake purrrilla df:n ulkopuolella
-infl_cat_vec <- purrr::map_chr(
-  seq_len(nrow(df)),
-  function(i) {
-    hist_values <- df$Inflation_10Y_Rolling[max(1, i - window_size):(i - 1)]
-    inflation_cats(hist_values, df$Inflation_10Y_Rolling[i])
-  }
-)
-
-df$Inflation_Category <- factor(
-  infl_cat_vec,
-  levels = c("negative", "low", "high")
-)
-
+# Plot inflation categories over time
 ggplot(df, aes(x = Date,
-               y = Inflation_10Y_Rolling,          # halutessasi: Inflation_10Y_Rolling
+               y = Inflation_10Y_Rolling,
                color = Inflation_Category)) +
   geom_point(alpha = 0.6) +
   scale_color_manual(
     values = c(
       "negative" = "red",
       "low"      = "green",
+      "medium" = "yellow",
       "high"     = "purple"
     )
   ) +
@@ -122,6 +72,9 @@ ggplot(df, aes(x = Date,
     panel.grid.major = element_line(),
     panel.grid.minor = element_line()
   )
+
+var(df$Real_Return_10Y)
+hist(df$Real_Return_10Y)
 
 ###########################
 #### Utility functions ####
@@ -182,14 +135,14 @@ convergence_diagnostics <- function(current_date, model){
 # Formula for bayesian model
 formula <- bf(
   Real_Return_10Y ~ 1 + CAPE,
-  family = "gaussian",
-  center = FALSE
+  family = "gaussian"
 )
 
 priors <- c(
-  prior(normal(0, 1), class = "b"),
-  prior(normal(0, 1), class = "sd")
+  prior(normal(-0.3,0.15), class = "b", coef = "CAPE"),
+  prior(normal(13,1),class = "Intercept")
 )
+
 
 ###########################
 #### Fit Initial Model ####
@@ -216,10 +169,6 @@ model <- brm(
 ##################################################
 
 for (i in seq_along(test_dates)) {
-  
-  if (i > 10){
-    break
-  }
   
   start <- proc.time()
   

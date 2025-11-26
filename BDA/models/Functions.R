@@ -2,36 +2,8 @@ library(dplyr)
 library(lubridate)
 library(brms)
 
-#### Inflation bin function
-make_infl_bins_DEF_LOW_HIGH <- function(train, df, col) {
-  xtr  <- train[[col]]
-  # median of strictly positive inflation in TRAIN
-  pos  <- xtr[xtr > 0 & is.finite(xtr)]
-  med  <- if (length(pos) > 0) stats::median(pos, na.rm = TRUE) else NA_real_
-  # tiny epsilon to ensure strictly increasing breaks if needed
-  eps  <- 1e-12
-  if (!is.finite(med) || med <= 0) med <- 0 + eps
-  
-  # (-Inf, 0] = NEG, (0, med] = LOW, (med, Inf] = HIGH
-  edges  <- c(-Inf, 0, med, Inf)
-  labels <- c("NEG", "LOW", "HIGH")
-  
-  binned <- cut(df[[col]], breaks = edges, labels = labels,
-                include.lowest = TRUE, right = TRUE)
-  # enforce fixed levels even if some bins are empty
-  factor(binned, levels = labels)
-}
-
-#### Train-only LOW/HIGH bins for GS10 (or any rate column)
-make_rate_bins_LOW_HIGH <- function(train, df, col = "GS10") {
-  thr <- stats::median(train[[col]], na.rm = TRUE)  # train-only threshold
-  labs <- c("LOW","HIGH")
-  out <- ifelse(df[[col]] <= thr, "LOW", "HIGH")
-  factor(out, levels = labs)
-}
-
-
 #### Build priors
+# CAPE-only model with center=FALSE
 build_priors_from_window <- function(df, train_end, window_months = 360) {
   prior_start <- train_end %m-% months(window_months)
   
@@ -71,8 +43,48 @@ build_priors_from_window <- function(df, train_end, window_months = 360) {
   priors
 }
 
+# CAPE-only model with center=TRUE
+build_priors_from_window_centered <- function(df, train_end, window_months = 360) {
+  prior_start <- train_end %m-% months(window_months)
+  
+  prior_window <- df %>%
+    filter(Date > prior_start, Date <= train_end)
+  
+  if (nrow(prior_window) < 50) {
+    stop("Not enough data in prior_window to estimate priors.")
+  }
+  
+  lm_fit <- lm(Real_Return_10Y ~ CAPE, data = prior_window)
+  summ   <- summary(lm_fit)
+  beta_tab <- summ$coefficients
+  
+  intercept_mean <- beta_tab["(Intercept)", "Estimate"]
+  intercept_sd   <- beta_tab["(Intercept)", "Std. Error"]
+  
+  slope_mean <- beta_tab["CAPE", "Estimate"]
+  slope_sd   <- beta_tab["CAPE", "Std. Error"]
+  
+  # Build the prior strings
+  slope_prior_str     <- paste0("normal(", slope_mean, ", ", slope_sd, ")")
+  intercept_prior_str <- paste0("normal(", intercept_mean, ", ", intercept_sd, ")")
+  
+  # Use do.call so prior() sees *character* constants, not expressions
+  priors <- c(
+    do.call(
+      prior,
+      list(slope_prior_str, class = "b", coef = "CAPE")
+    ),
+    do.call(
+      prior,
+      list(intercept_prior_str, class = "Intercept")
+    )
+  )
+  
+  priors
+}
+
 # Hierarchical priors (bad)
-build_hierarchical_priors_from_window <- function(df, train_end, window_months = 360) {
+hierarchical_priors_from_window <- function(df, train_end, window_months = 360) {
   prior_start <- train_end %m-% months(window_months)
   
   prior_window <- df %>%
@@ -109,15 +121,15 @@ build_hierarchical_priors_from_window <- function(df, train_end, window_months =
       list(intercept_prior_str, class = "Intercept")
     ),
     # NEW: hierarchical structure priors (do not depend on the window)
-    prior(exponential(0.5), class = "sd"),   # group-level SDs for random effects
+    prior(exponential(1), class = "sd"),   # group-level SDs for random effects
     prior(lkj(2),         class = "cor")   # correlation between intercept & slope REs
   )
   
   priors
 }
 
-# Hierarchical priors (improved)
-build_hierarchical_priors_from_window <- function(df, train_end, window_months = 360) {
+# Hierarchical priors (improved) (centered FALSE)
+hierarchical_priors_from_window_uncentered <- function(df, train_end, window_months = 360) {
   prior_start <- train_end %m-% months(window_months)
   
   prior_window <- df %>%
@@ -138,8 +150,8 @@ build_hierarchical_priors_from_window <- function(df, train_end, window_months =
   slope_sd       <- beta_tab["CAPE",        "Std. Error"]
   
   # Optionally inflate the SEs a bit to avoid over-confident priors
-  slope_sd      <- max(slope_sd * 2, 0.1)
-  intercept_sd  <- max(intercept_sd * 2, 0.5)
+  slope_sd      <- slope_sd * 2
+  intercept_sd  <- intercept_sd * 2
   
   slope_prior_str     <- paste0("normal(", slope_mean,     ", ", slope_sd,     ")")
   intercept_prior_str <- paste0("normal(", intercept_mean, ", ", intercept_sd, ")")
@@ -151,15 +163,16 @@ build_hierarchical_priors_from_window <- function(df, train_end, window_months =
     ),
     do.call(
       prior,
-      list(intercept_prior_str, class = "Intercept")
+      list(intercept_prior_str, class = "b", coef = "Intercept")
     ),
     # NEW: hierarchical structure priors (do not depend on the window)
-    prior(exponential(0.5), class = "sd"),   # group-level SDs for random effects
+    prior(exponential(1), class = "sd"),   # group-level SDs for random effects
     prior(lkj(2),         class = "cor")   # correlation between intercept & slope REs
   )
   
   priors
 }
+
 
 
 ###########################
@@ -196,7 +209,6 @@ convergence_diagnostics <- function(current_date, model){
   for (i in seq_along(param_cols)) {
     par <- param_cols[i]
     par_draws <- draws_array[,,par]  # iterations x chains
-    print(par_draws)
     rhat_vals[i] <- rhat(par_draws)
     ess_bulk_vals[i] <- ess_bulk(par_draws)
     ess_tail_vals[i] <- ess_tail(par_draws)
@@ -231,6 +243,14 @@ compute_log_pred_density <- function(model, newdata) {
   # log_pred_density is a vector, one LPD for each row in newdata.
   # Since your loop only uses one test sample (row) at a time, we return the first element.
   return(log_pred_density[1])
+}
+
+
+#### This utility function is only for the hierarchical models moving more than one step ahead
+compute_log_pred_density_hier <- function(model, newdata) {
+  log_lik_matrix <- log_lik(model, newdata = newdata, allow_new_levels = TRUE)
+  lik_matrix     <- exp(log_lik_matrix)
+  log(colMeans(lik_matrix))
 }
 
 

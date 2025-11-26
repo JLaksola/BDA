@@ -44,24 +44,18 @@ diagnostics <- list()
 # Generate monthly test dates
 test_dates <- seq(from = test_start, to = test_end, by = "month")
 n_iter     <- length(test_dates)
+step_size_months <- 6L
 
 ######################
 #### Define Model ####
 ######################
 
 formula <- bf(
-  Real_Return_10Y ~ 1 + CAPE,
+  Real_Return_10Y ~ 1 + CAPE + (1 + CAPE | Inflation_Category),
   family = "gaussian",
   center = FALSE
 )
-
-current_priors <- build_priors_from_window(
-  df            = df,
-  train_end     = as.Date("1980-01-01"),
-  window_months = 360
-)
-
-current_priors
+get_prior(formula,data=df)
 
 ##################################################
 #### Rolling Forecast Loop With Model Updates ####
@@ -93,7 +87,7 @@ for (k in seq_along(prior_update_dates)) {
   train <- df %>%
     filter(Date >= train_start, Date <= train_end)
   
-  current_priors <- build_priors_from_window(
+  current_priors <- hierarchical_priors_from_window_uncentered(
     df            = df,
     train_end     = train_end,
     window_months = 360
@@ -114,10 +108,13 @@ for (k in seq_along(prior_update_dates)) {
     chains  = 3,
     iter    = 2000,
     warmup  = 1000,
-    cores   = cores,
     backend = "cmdstanr",
-    seed = 1
+    cores   = cores,
+    adapt_delta   = 0.995,
+    max_treedepth = 15,
+    seed    = 1
   )
+  
   
   # block boundaries
   block_start <- as.Date(prior_date)
@@ -127,7 +124,11 @@ for (k in seq_along(prior_update_dates)) {
     test_end
   }
   
-  block_dates <- test_dates[test_dates >= block_start & test_dates <= block_end]
+  block_dates <- seq(
+    from = block_start,
+    to   = block_end,
+    by   = paste0(step_size_months, " months")
+  )
   
   # ---- inner monthly loop ----
   for (current_date in block_dates) {
@@ -138,46 +139,47 @@ for (k in seq_along(prior_update_dates)) {
     cat("\nBLOCK", k, "STEP", block_index,
         "DATE", as.character(current_date), "\n")
     
-    # Test sample for this month
-    test_sample <- df %>% filter(Date == current_date)
+    ## ---- define a 6-month test window ----
+    window_end <- min(current_date %m+% months(step_size_months - 1L),
+                      block_end)
     
-    # --- Prediction ---
+    test_sample <- df %>%
+      filter(Date >= current_date, Date <= window_end)
+    
+    if (nrow(test_sample) == 0) next  # just in case
+    
+    ## ---- vectorised prediction for all rows in test_sample ----
     posterior_draws <- posterior_epred(
       model,
       newdata          = test_sample,
       allow_new_levels = TRUE
     )
-    y_pred   <- mean(posterior_draws)
-    ci_lower <- quantile(posterior_draws, probs = 0.025)
-    ci_upper <- quantile(posterior_draws, probs = 0.975)
-    y_true   <- test_sample$Real_Return_10Y
-    lpd <- compute_log_pred_density(model, test_sample)
+    # posterior_draws: iterations x n_test
     
-    # Store results
-    predictions <- c(predictions, as.numeric(y_pred))
-    actuals     <- c(actuals, as.numeric(y_true))
-    lowers      <- c(lowers, ci_lower)
-    uppers      <- c(uppers, ci_upper)
-    dates_vec   <- c(dates_vec, current_date)
-    lpds        <- c(lpds, lpd)
+    y_pred_vec   <- colMeans(posterior_draws)
+    ci_lower_vec <- apply(posterior_draws, 2, quantile, probs = 0.025)
+    ci_upper_vec <- apply(posterior_draws, 2, quantile, probs = 0.975)
+    y_true_vec   <- test_sample$Real_Return_10Y
     
-    # Store convergence diagnostics
+    # log predictive density for each row
+    lpd_vec <- compute_log_pred_density_hier(model, test_sample)
+    
+    ## ---- store results for ALL rows in this 6-month window ----
+    predictions <- c(predictions, as.numeric(y_pred_vec))
+    actuals     <- c(actuals,   as.numeric(y_true_vec))
+    lowers      <- c(lowers,    ci_lower_vec)
+    uppers      <- c(uppers,    ci_upper_vec)
+    dates_vec   <- c(dates_vec, test_sample$Date)
+    lpds        <- c(lpds,      lpd_vec)
+    
+    ## ---- convergence diagnostics once per step (still per block) ----
     diag_df <- convergence_diagnostics(current_date, model)
     diag_df$Block <- k
     diag_df$Step  <- block_index
-    
     diagnostics[[block_index]] <- diag_df
     
-    # Posterior predictive check at the end of the block
-    if (current_date == block_end) {
-      png(paste0("pp_check_block_", k, "_", current_date, ".png"),
-          width = 800, height = 600)
-      pp_check(model, ndraws = 50)
-      dev.off()
-    }
-    
-    # --- Update training data for next month in this block ---
-    next_train_end <- as.Date(current_date) %m-% years(10) %m-% months(1)
+    ## ---- update training end only after this window ----
+    next_train_end <- window_end %m-% years(10) %m-% months(1)
     
     if (next_train_end > train_end) {
       train_end <- next_train_end
@@ -187,11 +189,20 @@ for (k in seq_along(prior_update_dates)) {
       model <- update(
         model,
         newdata   = train,
-        recompile = FALSE
-      )
+        recompile = FALSE)
     }
   }
+  saveRDS(
+    model,
+    file = paste0(
+      "hier_inf_block_",
+      sprintf("%02d", k), "_",
+      format(block_end, "%Y-%m-%d"),
+      ".rds"
+    )
+  )
 }
+  
 
 
 ###########################
@@ -207,31 +218,9 @@ results_df <- data.frame(
   Lpds      = lpds
 )
 
-###########
-# Import data
-setwd("C:/Users/Käyttäjä/Desktop/BDA/models/Results_inf_prior_center_FALSE")
-
-# 1. Rolling-forecast results
-results_df <- read.csv("results_forecast.csv", stringsAsFactors = FALSE)
-results_df$Date <- as.Date(results_df$Date)   # convert back to Date
-
-# 2. Convergence diagnostics over time
-diagnostics_df <- read.csv("diagnostics_forecast.csv", stringsAsFactors = FALSE)
-diagnostics_df$Date <- as.Date(diagnostics_df$Date)
-
-# 3. Priors used in each block
-priors_df <- read.csv("priors_used.csv", stringsAsFactors = FALSE)
-priors_df$prior_date <- as.Date(priors_df$prior_date)
-priors_df$train_end  <- as.Date(priors_df$train_end)
-
-# 4. Fitted model object (last model in the loop)
-model <- readRDS("Inf_linreg_model.rds")
-###########
-
-
 overall_rmse <- sqrt(mean((results_df$Actual - results_df$Predicted)^2))
 r_squared    <- cor(results_df$Actual, results_df$Predicted)^2
-total_elpd   <- sum(results_df$Lpds)
+total_elpd   <- sum(lpds)
 
 cat("Overall RMSE:", overall_rmse, "\n")
 cat("Overall R-squared:", r_squared, "\n")
@@ -287,6 +276,8 @@ ggplot(ess_long, aes(x = Date, y = ESS_Value, linetype = ESS_Type)) +
   theme_minimal() +
   theme(legend.position = "bottom")
 
+
+
 mcmc_plot(model, type="trace")
 
 # Posterior predictive checks
@@ -295,6 +286,11 @@ pp_check(model, type = "scatter_avg")
 pp_check(model, type = "intervals")
 pp_check(model, type = "error_hist")
 pp_check(model, type = "error_scatter")
+pp_check(model, type = "dens_overlay_grouped", group = "Inflation_Category")
+summary(model)$fixed      # Rhat for population-level
+summary(model)$random     # Rhat for group-level
+summary(model)$spec_pars  # Rhat for sigma, etc.
+
 
 
 # Save the diagnostics and results
@@ -334,9 +330,3 @@ priors_df <- priors_df %>%
 
 # Save to CSV
 write.csv(priors_df, "priors_used.csv", row.names = FALSE)
-
-# Save the model
-saveRDS(model, file = "Inf_linreg_model.rds")
-
-
-

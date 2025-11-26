@@ -50,17 +50,16 @@ n_iter     <- length(test_dates)
 ######################
 
 formula <- bf(
-  Real_Return_10Y ~ 1 + CAPE,
+  Real_Return_10Y ~ 1 + CAPE + (1 + CAPE | Inflation_Category),
   family = "gaussian",
   center = FALSE
 )
-
-current_priors <- build_priors_from_window(
+get_prior(formula,data=df)
+current_priors <- build_hierarchical_priors_from_window(
   df            = df,
   train_end     = as.Date("1980-01-01"),
   window_months = 360
 )
-
 current_priors
 
 ##################################################
@@ -93,7 +92,7 @@ for (k in seq_along(prior_update_dates)) {
   train <- df %>%
     filter(Date >= train_start, Date <= train_end)
   
-  current_priors <- build_priors_from_window(
+  current_priors <- build_hierarchical_priors_from_window(
     df            = df,
     train_end     = train_end,
     window_months = 360
@@ -109,13 +108,15 @@ for (k in seq_along(prior_update_dates)) {
   
   model <- brm(
     formula = formula,
-    prior   = current_priors,
-    data    = train,
-    chains  = 3,
-    iter    = 2000,
-    warmup  = 1000,
-    cores   = cores,
+    prior = current_priors,
+    data = train,
+    chains = 3,
+    iter = 2000,
+    warmup = 1000,
     backend = "cmdstanr",
+    cores = cores,
+    adapt_delta = 0.99,
+    max_treedepth = 20,
     seed = 1
   )
   
@@ -151,7 +152,7 @@ for (k in seq_along(prior_update_dates)) {
     ci_lower <- quantile(posterior_draws, probs = 0.025)
     ci_upper <- quantile(posterior_draws, probs = 0.975)
     y_true   <- test_sample$Real_Return_10Y
-    lpd <- compute_log_pred_density(model, test_sample)
+    lpd <- compute_log_pred_density_hier(model, test_sample)
     
     # Store results
     predictions <- c(predictions, as.numeric(y_pred))
@@ -207,31 +208,9 @@ results_df <- data.frame(
   Lpds      = lpds
 )
 
-###########
-# Import data
-setwd("C:/Users/Käyttäjä/Desktop/BDA/models/Results_inf_prior_center_FALSE")
-
-# 1. Rolling-forecast results
-results_df <- read.csv("results_forecast.csv", stringsAsFactors = FALSE)
-results_df$Date <- as.Date(results_df$Date)   # convert back to Date
-
-# 2. Convergence diagnostics over time
-diagnostics_df <- read.csv("diagnostics_forecast.csv", stringsAsFactors = FALSE)
-diagnostics_df$Date <- as.Date(diagnostics_df$Date)
-
-# 3. Priors used in each block
-priors_df <- read.csv("priors_used.csv", stringsAsFactors = FALSE)
-priors_df$prior_date <- as.Date(priors_df$prior_date)
-priors_df$train_end  <- as.Date(priors_df$train_end)
-
-# 4. Fitted model object (last model in the loop)
-model <- readRDS("Inf_linreg_model.rds")
-###########
-
-
 overall_rmse <- sqrt(mean((results_df$Actual - results_df$Predicted)^2))
 r_squared    <- cor(results_df$Actual, results_df$Predicted)^2
-total_elpd   <- sum(results_df$Lpds)
+total_elpd   <- sum(lpds)
 
 cat("Overall RMSE:", overall_rmse, "\n")
 cat("Overall R-squared:", r_squared, "\n")
@@ -287,6 +266,8 @@ ggplot(ess_long, aes(x = Date, y = ESS_Value, linetype = ESS_Type)) +
   theme_minimal() +
   theme(legend.position = "bottom")
 
+
+
 mcmc_plot(model, type="trace")
 
 # Posterior predictive checks
@@ -295,6 +276,7 @@ pp_check(model, type = "scatter_avg")
 pp_check(model, type = "intervals")
 pp_check(model, type = "error_hist")
 pp_check(model, type = "error_scatter")
+pp_check(model, type = "dens_overlay_grouped", group = "Inflation_Category")
 
 
 # Save the diagnostics and results
@@ -336,7 +318,5 @@ priors_df <- priors_df %>%
 write.csv(priors_df, "priors_used.csv", row.names = FALSE)
 
 # Save the model
-saveRDS(model, file = "Inf_linreg_model.rds")
-
-
+saveRDS(model, file = "Hierarchical_inf_model.rds")
 
