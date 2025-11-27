@@ -230,6 +230,7 @@ priors_df$prior_date <- as.Date(priors_df$prior_date)
 priors_df$train_end  <- as.Date(priors_df$train_end)
 
 # 4. Fitted model object (last model in the loop)
+library(rstan)
 model <- readRDS("Pooled_weakinf_block_09_2015-09-01.rds")
 ###########
 
@@ -343,4 +344,5 @@ priors_df <- priors_df %>%
   select(block, prior_date, train_end, everything())
 
 # Save to CSV
+
 write.csv(priors_df, "priors_used.csv", row.names = FALSE)
