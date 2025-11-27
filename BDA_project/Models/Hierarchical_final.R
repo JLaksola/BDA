@@ -210,12 +210,7 @@ for (k in seq_along(prior_update_dates)) {
   )
 }
 
-
-
-###########################
-#### Inspect Results ####
-###########################
-
+# Save the results
 results_df <- data.frame(
   Date      = dates_vec,
   Predicted = predictions,
@@ -224,6 +219,31 @@ results_df <- data.frame(
   Lower     = lowers,
   Lpds      = lpds
 )
+
+###########
+# Import data
+setwd("C:/Users/Käyttäjä/Desktop/BDA/models/Pooled_30yr_prior")
+
+# 1. Rolling-forecast results
+results_df <- read.csv("results_forecast.csv", stringsAsFactors = FALSE)
+results_df$Date <- as.Date(results_df$Date)   # convert back to Date
+
+# 2. Convergence diagnostics over time
+diagnostics_df <- read.csv("diagnostics_forecast.csv", stringsAsFactors = FALSE)
+diagnostics_df$Date <- as.Date(diagnostics_df$Date)
+
+# 3. Priors used in each block
+priors_df <- read.csv("priors_used.csv", stringsAsFactors = FALSE)
+priors_df$prior_date <- as.Date(priors_df$prior_date)
+priors_df$train_end  <- as.Date(priors_df$train_end)
+
+# 4. Fitted model object (last model in the loop)
+model <- readRDS("Pooled_weakinf_block_09_2015-09-01.rds")
+###########
+
+###########################
+#### Inspect Results ####
+###########################
 
 overall_rmse <- sqrt(mean((results_df$Actual - results_df$Predicted)^2))
 r_squared    <- cor(results_df$Actual, results_df$Predicted)^2
@@ -329,6 +349,8 @@ priors_df <- map_dfr(priors_used, function(x) {
   
   p_df
 })
+
+priors_df
 
 # Optional: reorder columns a bit
 priors_df <- priors_df %>%
