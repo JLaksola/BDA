@@ -15,7 +15,7 @@ set_cmdstan_path("~/cmdstan/cmdstan-2.37.0")
 cores <- max(1, parallel::detectCores() - 1)
 
 ### Preprocess data ###
-file_path <- "C:/Users/Käyttäjä/Desktop/BDA/data/processed/Shiller_cleaned.csv"
+file_path <- "C:/Users/Käyttäjä/Desktop/BDA_project/data/Shiller_cleaned.csv"
 df <- read.csv(file_path, stringsAsFactors = FALSE) %>%
   mutate(Date = as.Date(Date)) %>%
   filter(complete.cases(.)) %>%
