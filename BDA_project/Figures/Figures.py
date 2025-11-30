@@ -4,7 +4,7 @@ import numpy as np
 import statsmodels.api as sm
 
 # Load the data
-file_path = "/Users/kayttaja/Desktop/BDA/data/processed/Shiller_cleaned.csv"
+file_path = "/Users/kayttaja/Desktop/BDA_project/data/Shiller_cleaned.csv"
 df = pd.read_csv(file_path)
 df["Date"] = pd.to_datetime(df["Date"])
 df = df.set_index("Date")
