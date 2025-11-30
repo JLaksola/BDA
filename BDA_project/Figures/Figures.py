@@ -103,15 +103,15 @@ for end_date in reg_df.index:
     slopes_rolling.append(m_temp.params["CAPE"])
     intercepts_rolling.append(m_temp.params["const"])
 
-# ---- Plot as subplots ----
+# Plot as subplots
 fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
 
-# Top: intercepts
+# Intercepts
 axes[0].plot(dates_rolling, intercepts_rolling, color="brown")
 axes[0].set_ylabel(f"Rolling {window_years}-Year Intercept")
 axes[0].grid(True)
 
-# Bottom: slopes
+# Slopes
 axes[1].plot(dates_rolling, slopes_rolling, color="orange")
 axes[1].set_ylabel(f"Rolling {window_years}-Year Slope")
 axes[1].set_xlabel("Date")
